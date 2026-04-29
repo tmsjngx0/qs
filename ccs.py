@@ -197,9 +197,83 @@ def shorten_cwd(cwd: str) -> str:
 # Body rendering — converts a parsed entry to a markdown string for bat preview
 # ===========================================================================
 
+# Strings longer than this (or containing newlines) get extracted into a fenced
+# code block instead of staying inline. This is what fixes the "huge JSON
+# escape-sequence wall" problem on Codex `session_meta.base_instructions.text`
+# and similar large-text payloads.
+LONG_STRING_THRESHOLD = 120
+
+
+def _pretty_value(value: object, depth: int = 0) -> str:
+    """Render a JSON-ish value as markdown.
+
+    Returns a fragment that is either:
+      - inline (single token, no leading newline) — caller appends after a
+        ': ' on the parent line; or
+      - block (starts with '\n') — caller appends directly to the parent line.
+
+    Multi-line / long strings always become fenced blocks; small scalars stay
+    inline; nested dicts/lists become indented bullet lists.
+    """
+    pad = "  " * depth
+    if value is None:
+        return "_null_"
+    if isinstance(value, bool):
+        return f"`{str(value).lower()}`"
+    if isinstance(value, (int, float)):
+        return f"`{value}`"
+    if isinstance(value, str):
+        if not value:
+            return '`""`'
+        if "\n" in value or len(value) > LONG_STRING_THRESHOLD:
+            return "\n\n```\n" + value + "\n```"
+        return value
+    if isinstance(value, list):
+        if not value:
+            return "`[]`"
+        lines = []
+        for item in value:
+            rendered = _pretty_value(item, depth + 1)
+            if rendered.startswith("\n"):
+                lines.append(f"{pad}-{rendered}")
+            else:
+                lines.append(f"{pad}- {rendered}")
+        return "\n" + "\n".join(lines)
+    if isinstance(value, dict):
+        if not value:
+            return "`{}`"
+        lines = []
+        for k, v in value.items():
+            rendered = _pretty_value(v, depth + 1)
+            if rendered.startswith("\n"):
+                lines.append(f"{pad}- **{k}**:{rendered}")
+            else:
+                lines.append(f"{pad}- **{k}**: {rendered}")
+        return "\n" + "\n".join(lines)
+    return f"`{value!r}`"
+
+
+def _maybe_humanize_json(text: str) -> str:
+    """If text looks like a one-line JSON object/array, parse + prettify.
+    Otherwise return as-is. Used to unwrap raw JSONL lines that end up
+    embedded as plain strings inside tool_result / user message content."""
+    if not isinstance(text, str):
+        return str(text)
+    s = text.strip()
+    if not s:
+        return text
+    if (s[0] == "{" and s[-1] == "}") or (s[0] == "[" and s[-1] == "]"):
+        try:
+            obj = json.loads(s)
+        except (json.JSONDecodeError, ValueError):
+            return text
+        return _pretty_value(obj, 0).lstrip("\n")
+    return text
+
 
 def render_user(ts: str, cleaned: str) -> str:
-    return f"# user — {ts or '-'}\n\n{cleaned}\n"
+    body = _maybe_humanize_json(cleaned)
+    return f"# user — {ts or '-'}\n\n{body}\n"
 
 
 def render_assistant_blocks(ts: str, content: object) -> str:
@@ -216,29 +290,34 @@ def render_assistant_blocks(ts: str, content: object) -> str:
                 lines.append("")
             elif t == "tool_use":
                 name = block.get("name", "?")
-                inp = json.dumps(block.get("input", {}), ensure_ascii=False, indent=2)
-                lines.append(f"## tool_use: {name}\n\n```json\n{inp}\n```\n")
+                inp = block.get("input", {})
+                lines.append(f"## tool_use: {name}")
+                lines.append(_pretty_value(inp, 0).lstrip("\n"))
+                lines.append("")
             elif t == "thinking":
                 thinking = block.get("thinking", "") or block.get("text", "")
                 if thinking:
-                    lines.append(f"## thinking\n\n> {thinking.replace(chr(10), chr(10)+'> ')}\n")
+                    lines.append(f"## thinking\n\n> " + thinking.replace("\n", "\n> "))
+                    lines.append("")
             else:
-                lines.append("```json\n" + json.dumps(block, ensure_ascii=False, indent=2) + "\n```")
+                lines.append(_pretty_value(block, 0).lstrip("\n"))
     elif isinstance(content, str):
-        lines.append(content)
+        lines.append(_maybe_humanize_json(content))
     return "\n".join(lines).rstrip() + "\n"
 
 
 def render_tool_result(ts: str, content: object) -> str:
     text = extract_text(content) if not isinstance(content, str) else content
-    return f"# tool_result — {ts or '-'}\n\n```\n{text}\n```\n"
+    body = _maybe_humanize_json(text)
+    if body == text:
+        # Plain text — keep it as a fenced raw block for safety
+        return f"# tool_result — {ts or '-'}\n\n```\n{text}\n```\n"
+    return f"# tool_result — {ts or '-'}\n\n{body}\n"
 
 
 def render_generic(label: str, ts: str, raw: dict) -> str:
-    return (
-        f"# {label} — {ts or '-'}\n\n"
-        "```json\n" + json.dumps(raw, ensure_ascii=False, indent=2)[:8000] + "\n```\n"
-    )
+    body = _pretty_value(raw, 0).lstrip("\n")
+    return f"# {label} — {ts or '-'}\n\n{body}\n"
 
 
 # ===========================================================================
@@ -517,23 +596,33 @@ class PiAdapter(Adapter):
     def available(self) -> bool:
         return PI_SESSIONS.exists()
 
+    @staticmethod
+    def _encode_cwd(cwd: str) -> str:
+        # Pi encodes /a/b/c as --a-b-c-- (each slash becomes a dash, then the
+        # whole thing is wrapped in another pair of dashes). Equivalent to
+        # appending a trailing slash before the slash→dash replacement and
+        # then surrounding with single dashes:
+        #   /home/thoma/source/qs → /home/thoma/source/qs/
+        #   → -home-thoma-source-qs-
+        #   → --home-thoma-source-qs--
+        normalized = cwd.rstrip("/") + "/"
+        return "-" + normalized.replace("/", "-") + "-"
+
     def _project_dirs(self, cwd_filter: str | None, all_projects: bool) -> list[Path]:
         if cwd_filter:
-            encoded = "-" + cwd_filter.replace("/", "-") + "-"
-            p = PI_SESSIONS / encoded
+            p = PI_SESSIONS / self._encode_cwd(cwd_filter)
             return [p] if p.exists() else []
         if all_projects:
             return [d for d in PI_SESSIONS.iterdir() if d.is_dir()]
-        cwd = os.getcwd()
-        encoded = "-" + cwd.replace("/", "-") + "-"
-        default = PI_SESSIONS / encoded
+        default = PI_SESSIONS / self._encode_cwd(os.getcwd())
         if default.exists():
             return [default]
         return [d for d in PI_SESSIONS.iterdir() if d.is_dir()]
 
     def discover(self, *, cwd_filter, all_projects):
         for proj_dir in self._project_dirs(cwd_filter, all_projects):
-            cwd_for_records = proj_dir.name.strip("-").replace("-", "/")
+            # Decode --home-thoma-source-qs-- back to /home/thoma/source/qs
+            cwd_for_records = "/" + proj_dir.name.strip("-").replace("-", "/")
             for filepath in proj_dir.glob("*.jsonl"):
                 # Skip imported-claude dupes (recall-day's dedup behaviour)
                 if filepath.name.startswith("imported-claude-"):
@@ -804,9 +893,12 @@ def shutil_which(command: str) -> str | None:
 
 def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
             initial_query: str | None = None, prompt: str = "> ") -> str:
+    """Returns "" on ESC/Ctrl-C/empty selection so callers can implement
+    multi-level navigation (ESC = back one level, not exit)."""
     cmd = [
         "fzf",
         "--ansi",
+        "--no-mouse",
         "--delimiter", "\t",
         "--with-nth", with_nth,
         "--prompt", prompt,
@@ -822,9 +914,8 @@ def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
         text=True,
         stdout=subprocess.PIPE,
     )
-    if result.returncode == 130:
-        # User pressed esc/Ctrl-C — clean exit
-        raise SystemExit(0)
+    if result.returncode in (1, 130):
+        return ""
     if result.returncode != 0:
         raise SystemExit(result.returncode)
     return result.stdout.strip()
@@ -893,21 +984,27 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
     ]
     if skipped:
         header_bits.append(f"unavailable: {', '.join(skipped)}")
-    selected = run_fzf(
-        lines,
-        header="  |  ".join(header_bits),
-        preview=preview_cmd,
-        with_nth="4..",
-        initial_query=query,
-        prompt="ccs> ",
-    )
-    if not selected:
-        return 0
-    parts = selected.split("\t")
-    if len(parts) < 3:
-        return 0
-    tool, locator, _sid = parts[0], parts[1], parts[2]
-    return browse_messages(tool, locator)
+    header = "  |  ".join(header_bits)
+
+    while True:
+        selected = run_fzf(
+            lines,
+            header=header,
+            preview=preview_cmd,
+            with_nth="4..",
+            initial_query=query,
+            prompt="ccs> ",
+        )
+        if not selected:
+            return 0
+        # Only apply the initial query on the first round so returning from
+        # message view doesn't keep re-pre-filling the filter.
+        query = None
+        parts = selected.split("\t")
+        if len(parts) < 3:
+            continue
+        tool, locator = parts[0], parts[1]
+        browse_messages(tool, locator)
 
 
 def browse_messages(tool: str, locator: str) -> int:
@@ -929,20 +1026,23 @@ def browse_messages(tool: str, locator: str) -> int:
             summary,
         ]))
     preview_cmd = _self_invoke("--preview-message", tool, locator, "{1}")
-    selected = run_fzf(
-        lines,
-        header=f"{tool} • {len(records)} messages  |  Enter: open in pager  •  Esc: back",
-        preview=preview_cmd,
-        with_nth="2..",
-        prompt=f"{tool}> ",
-    )
-    if not selected:
-        return 0
-    try:
-        idx = int(selected.split("\t", 1)[0])
-    except ValueError:
-        return 1
-    return show_message(tool, locator, idx)
+    header = f"{tool} • {len(records)} messages  |  Enter: open in pager  •  Esc: back"
+
+    while True:
+        selected = run_fzf(
+            lines,
+            header=header,
+            preview=preview_cmd,
+            with_nth="2..",
+            prompt=f"{tool}> ",
+        )
+        if not selected:
+            return 0
+        try:
+            idx = int(selected.split("\t", 1)[0])
+        except ValueError:
+            continue
+        show_message(tool, locator, idx)
 
 
 def show_message(tool: str, locator: str, index: int) -> int:
