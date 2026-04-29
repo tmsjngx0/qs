@@ -1,10 +1,19 @@
-# qs — Quick Search
+# qs / ccs
+
+Two separate terminal tools live in this repo:
+
+- `qs` — quick markdown search over a `qmd` knowledge base
+- `ccs` — multi-source coding-agent session browser (Claude Code, Codex, Pi, Opencode)
+
+They are intentionally separate tools. `qs` stays a small shell wrapper around `qmd`; `ccs` is a separate Python CLI because the session-browser path handling, multi-format JSON/SQLite parsing, and preview logic are a poor fit for more shell quoting.
+
+## qs
 
 Semantic search your markdown knowledge base from the terminal.
 
-`qmd` search → `fzf` selection → `glow` rendering — in one command.
+`qmd` search -> `fzf` selection -> `glow` rendering in one command.
 
-## Demo
+### Demo
 
 ```bash
 qs zfs snapshot          # hybrid search (BM25 + vector + reranking)
@@ -12,7 +21,7 @@ qs -f zfs snapshot       # BM25 keyword search (fast, no LLM)
 qs                       # browse all kb files with fzf
 ```
 
-## How it works
+### How it works
 
 ```
 ┌──────────┐     ┌─────────┐     ┌──────────┐
@@ -25,7 +34,7 @@ qs                       # browse all kb files with fzf
 2. **Pick** — `fzf` shows results with `bat` preview, ranked by relevance score
 3. **Render** — selected file opens in `glow` (terminal markdown renderer)
 
-## Keybindings (in fzf)
+### Keybindings (in fzf)
 
 | Key | Action |
 |-----|--------|
@@ -34,15 +43,15 @@ qs                       # browse all kb files with fzf
 | `Ctrl-E` | Open in `$EDITOR` |
 | `Esc` | Quit |
 
-## Requirements
+### Requirements
 
 - [qmd](https://github.com/tobilu/qmd) — markdown search engine (BM25 + vector)
 - [fzf](https://github.com/junegunn/fzf) — fuzzy finder
 - [glow](https://github.com/charmbracelet/glow) — terminal markdown renderer
 - [bat](https://github.com/sharkdp/bat) — cat with syntax highlighting (for fzf preview)
-- [fd](https://github.com/sharkdp/fd) — fast file finder (for browse mode)
+- [fd](https://github.com/sharkdp/fd) — fast file finder (optional; `find` is used as a fallback in browse mode)
 
-## Install
+### Install
 
 ```bash
 # Clone
@@ -55,7 +64,7 @@ ln -s ~/.local/share/qs/qs ~/.local/bin/qs
 echo 'qs() { ~/.local/share/qs/qs "$@"; }' >> ~/.zshrc
 ```
 
-## Setup qmd (required)
+### Setup qmd (required)
 
 `qs` searches whatever `qmd` has indexed. Set up your collections first:
 
@@ -71,11 +80,82 @@ qmd update
 qmd embed
 ```
 
-## Configuration
+### Configuration
 
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `QS_KB_DIR` | `~/kb` | Root directory for fzf browse mode |
+
+## ccs
+
+Browse coding-agent session logs from Claude Code, Codex, Pi, and Opencode in one picker. Type to filter, drill into messages, render with `bat`.
+
+### Requirements
+
+- `python3` (stdlib only — `sqlite3` is bundled)
+- [fzf](https://github.com/junegunn/fzf)
+- [bat](https://github.com/sharkdp/bat) — optional; falls back to `$PAGER`/`less`
+
+### Demo
+
+```bash
+ccs                              # current cwd, all available sources
+ccs migration plan               # pre-fill fzf query (substring filter on tool/cwd/title/time)
+ccs --all                        # scan every cwd across all tools
+ccs --source claude              # restrict to one tool (repeat to combine)
+ccs --cwd /home/thoma/source/qs  # specific cwd, all tools
+ccs --session ~/.claude/projects/.../foo.jsonl   # open a JSONL file directly
+ccs --session opencode://ses_2786e7db…           # open an Opencode session by id
+```
+
+### How it works
+
+```
+┌────────────────────────────┐
+│ adapters discover sessions │      claude / codex / pi / opencode
+│  (auto-skip if missing)    │      → SessionMeta records
+└─────────────┬──────────────┘
+              ▼
+┌────────────────────────────┐
+│ fzf session picker         │      one row per session, hidden cols carry
+│  (substring filter)        │      tool + locator for dispatch
+└─────────────┬──────────────┘
+              ▼
+┌────────────────────────────┐
+│ fzf message picker         │      message list w/ live preview
+│  (per session)             │
+└─────────────┬──────────────┘
+              ▼
+┌────────────────────────────┐
+│ bat pager on selected msg  │
+└────────────────────────────┘
+```
+
+Each adapter knows how to walk its native storage (JSONL files for Claude/Codex/Pi, read-only SQLite for Opencode). The picker uses `fzf`'s built-in interactive filter on a rich row (`tool · time · msgs · size · cwd · title`), so search is just typing.
+
+### Sources
+
+| Tool        | Storage                                          | Format      |
+|-------------|--------------------------------------------------|-------------|
+| Claude Code | `~/.claude/projects/<encoded-cwd>/*.jsonl`       | JSONL       |
+| Codex       | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`   | JSONL       |
+| Pi          | `~/.pi/agent/sessions/<encoded-cwd>/*.jsonl`     | JSONL       |
+| Opencode    | `~/.local/share/opencode/opencode.db`            | SQLite (RO) |
+
+Adapters auto-skip when their storage doesn't exist on the machine. Pi `imported-claude-*` files are deduped against Claude.
+
+### Configuration
+
+| Env var                | Default                                                  |
+|------------------------|----------------------------------------------------------|
+| `CLAUDE_PROJECTS_DIR`  | `~/.claude/projects`                                     |
+| `CODEX_HOME`           | `~/.codex`                                               |
+| `PI_SESSIONS_DIR`      | `~/.pi/agent/sessions`                                   |
+| `OPENCODE_DB`          | `~/.local/share/opencode/opencode.db`                    |
+
+### Notes
+
+Adapter classes are vendored from the [`recall`](https://github.com/tmsjngx0/agent-skills) skill so `ccs` has no runtime dependency on that skill's deploy location. Upstream changes can be re-vendored as needed.
 
 ## License
 
