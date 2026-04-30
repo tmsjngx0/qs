@@ -90,11 +90,27 @@ qmd embed
 
 Browse coding-agent session logs from Claude Code, Codex, Pi, and Opencode in one picker. Type to filter, drill into messages, render with `bat`.
 
+**Quick keys:** `Enter` open · `y` copy session · `Y` copy one msg · `?` in-app help · `Esc` back
+
 ### Requirements
 
-- `python3` (stdlib only — `sqlite3` is bundled)
-- [fzf](https://github.com/junegunn/fzf)
-- [bat](https://github.com/sharkdp/bat) — optional; falls back to `$PAGER`/`less`
+Realistically you install **zero or one thing** (fzf, optional). Everything else is Python stdlib or auto-detected with graceful fallback.
+
+| | Tool | Notes |
+|---|---|---|
+| Required | `python3` (≥3.9) | Stdlib only — no `pip install`. `sqlite3` is bundled. |
+| Recommended | [`fzf`](https://github.com/junegunn/fzf) | Fuzzy filter + live preview + key bindings. `brew install fzf` · `scoop install fzf` · `apt install fzf`. **Without it, ccs runs in a stdlib fallback picker** (numbered list, `/text` substring filter, `q` quit). |
+| Pager (optional, one of) | `bat` → `$PAGER` → `less` | First one found wins. Plain `less` is fine. |
+| Clipboard (optional, one of) | `pbcopy` · `wl-copy` · `xclip` · `xsel` · `clip.exe` | macOS / Wayland / X11 / X11 / WSL+Windows. Your OS already ships one. |
+
+### Platform support
+
+| Platform | Status |
+|---|---|
+| macOS | ✅ |
+| Linux (X11 / Wayland) | ✅ |
+| WSL2 on Windows | ✅ |
+| Native Windows | ⚠️ Partial — `clip.exe`/`fzf.exe` work, but Claude Code's project-directory encoding hasn't been verified. Use `--all` to bypass cwd filtering. |
 
 ### Demo
 
