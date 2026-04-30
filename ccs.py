@@ -926,28 +926,41 @@ def clipboard_copy(text: str) -> bool:
 
 def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
             initial_query: str | None = None, prompt: str = "> ",
-            bindings: list[str] | None = None) -> str:
+            bindings: list[str] | None = None,
+            banner: list[str] | None = None) -> str:
     """Returns "" on ESC/Ctrl-C/empty selection so callers can implement
     multi-level navigation (ESC = back one level, not exit).
 
     Falls back to a stdlib-only numbered picker when fzf isn't installed —
     same return contract, so callers don't need to know which mode is active.
     The fallback drops live preview and the y/Y/? bindings (it has its own
-    minimal '?' help); install fzf for the full experience."""
+    minimal '?' help); install fzf for the full experience.
+
+    `banner` is printed to stderr right before fzf launches. Combined with
+    --height=80%, fzf uses inline mode (bottom 80% of terminal) and the
+    banner stays visible above. This is how the shortcut cheatsheet escapes
+    the narrow ~35% left pane that --header is constrained to."""
     if not shutil.which("fzf"):
         return _run_fallback(lines, header=header, with_nth=with_nth,
                              prompt=prompt, initial_query=initial_query)
+    if banner:
+        sys.stderr.write("\n")
+        for line in banner:
+            sys.stderr.write(f"  {line}\n")
+        sys.stderr.flush()
     cmd = [
         "fzf",
         "--ansi",
         "--no-mouse",
-        # reverse layout: prompt at top, header (shortcut cheatsheet) sits
-        # right below it, list grows downward. This is the conventional
-        # search-tool layout (rg|fzf, git log fzf, etc) and — crucially —
-        # keeps the shortcut row visually anchored to the prompt instead of
-        # floating between the list and the prompt where it gets squeezed
-        # by the preview pane.
+        # reverse layout: prompt at top, header (status row) sits right below
+        # it, list grows downward. Conventional search-tool layout (rg|fzf,
+        # git log fzf, etc).
         "--layout=reverse",
+        # height=80% → inline mode. fzf occupies the bottom 80% of the
+        # terminal; the banner printed above stays visible in the top 20%.
+        # Without --height, fzf would take over the alt screen and the
+        # banner would be invisible until exit.
+        "--height=80%",
         "--delimiter", "\t",
         "--with-nth", with_nth,
         "--prompt", prompt,
@@ -1132,13 +1145,16 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
     lines = [session_line(s) for s in sessions]
     preview_cmd = _self_invoke("--preview-session", "{1}", "{2}")
     help_cmd = _self_invoke("--help-keys", "sessions")
-    # Multi-line --header: status on top, dedicated shortcut row below so the
-    # cheatsheet always fits on its own line regardless of terminal width.
+    # Header carries only the status (fits in fzf's narrow left pane).
+    # Shortcut goes into `banner`, which run_fzf prints to stderr above the
+    # fzf inline window — full terminal width, never truncated.
     status = f"{len(sessions)} sessions [{', '.join(s for s in sources if s not in skipped)}]"
     if skipped:
         status += f"  (unavailable: {', '.join(skipped)})"
-    shortcuts = "Enter: open  •  ?: help  •  Esc: quit  •  type to filter"
-    header = f"{status}\n{shortcuts}"
+    header = status
+    banner = [
+        "ccs sessions  —  Enter: open  ·  ?: in-app help  ·  Esc: quit  ·  type to filter",
+    ]
     bindings = [f"?:execute({help_cmd})"]
 
     while True:
@@ -1150,6 +1166,7 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
             initial_query=query,
             prompt="ccs> ",
             bindings=bindings,
+            banner=banner,
         )
         if not selected:
             return 0
@@ -1186,12 +1203,13 @@ def browse_messages(tool: str, locator: str) -> int:
     # {1} = message index (visible in row column 1, hidden via --with-nth=2..)
     copy_message_cmd = _self_invoke("--copy-message", tool, locator, "{1}")
     help_cmd = _self_invoke("--help-keys", "messages")
-    # Multi-line --header: status on top, shortcut row below — fzf prints each
-    # newline-separated line as its own header row, keeping the cheatsheet
-    # legible even when terminal width is tight.
-    status = f"{tool} • {len(records)} messages"
-    shortcuts = "Enter: open  •  y: copy all  •  Y: copy one  •  ?: help  •  Esc: back"
-    header = f"{status}\n{shortcuts}"
+    # Status in --header (narrow pane), shortcut in `banner` (full terminal
+    # width, printed above fzf's inline window). See run_fzf docstring.
+    header = f"{tool} • {len(records)} messages"
+    banner = [
+        f"ccs · {tool} session  —  Enter: open  ·  y: copy session  ·  "
+        "Y: copy one  ·  ?: help  ·  Esc: back",
+    ]
     # execute-silent runs the copy without redrawing the screen; change-header
     # gives non-modal feedback so the user knows it succeeded but stays in the
     # picker with their selection intact.
@@ -1209,6 +1227,7 @@ def browse_messages(tool: str, locator: str) -> int:
             with_nth="2..",
             prompt=f"{tool}> ",
             bindings=bindings,
+            banner=banner,
         )
         if not selected:
             return 0
