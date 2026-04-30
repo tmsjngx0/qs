@@ -1015,13 +1015,13 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
     lines = [session_line(s) for s in sessions]
     preview_cmd = _self_invoke("--preview-session", "{1}", "{2}")
     help_cmd = _self_invoke("--help-keys", "sessions")
-    header_bits = [
-        f"{len(sessions)} sessions [{', '.join(s for s in sources if s not in skipped)}]",
-        "Enter: open  •  ?: help  •  Esc: quit  •  type to filter",
-    ]
+    # Multi-line --header: status on top, dedicated shortcut row below so the
+    # cheatsheet always fits on its own line regardless of terminal width.
+    status = f"{len(sessions)} sessions [{', '.join(s for s in sources if s not in skipped)}]"
     if skipped:
-        header_bits.append(f"unavailable: {', '.join(skipped)}")
-    header = "  |  ".join(header_bits)
+        status += f"  (unavailable: {', '.join(skipped)})"
+    shortcuts = "Enter: open  •  ?: help  •  Esc: quit  •  type to filter"
+    header = f"{status}\n{shortcuts}"
     bindings = [f"?:execute({help_cmd})"]
 
     while True:
@@ -1069,10 +1069,12 @@ def browse_messages(tool: str, locator: str) -> int:
     # {1} = message index (visible in row column 1, hidden via --with-nth=2..)
     copy_message_cmd = _self_invoke("--copy-message", tool, locator, "{1}")
     help_cmd = _self_invoke("--help-keys", "messages")
-    header = (
-        f"{tool} • {len(records)} messages  |  "
-        f"Enter: open  •  y: copy all  •  Y: copy one  •  ?: help  •  Esc: back"
-    )
+    # Multi-line --header: status on top, shortcut row below — fzf prints each
+    # newline-separated line as its own header row, keeping the cheatsheet
+    # legible even when terminal width is tight.
+    status = f"{tool} • {len(records)} messages"
+    shortcuts = "Enter: open  •  y: copy all  •  Y: copy one  •  ?: help  •  Esc: back"
+    header = f"{status}\n{shortcuts}"
     # execute-silent runs the copy without redrawing the screen; change-header
     # gives non-modal feedback so the user knows it succeeded but stays in the
     # picker with their selection intact.
