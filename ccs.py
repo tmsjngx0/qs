@@ -928,7 +928,15 @@ def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
             initial_query: str | None = None, prompt: str = "> ",
             bindings: list[str] | None = None) -> str:
     """Returns "" on ESC/Ctrl-C/empty selection so callers can implement
-    multi-level navigation (ESC = back one level, not exit)."""
+    multi-level navigation (ESC = back one level, not exit).
+
+    Falls back to a stdlib-only numbered picker when fzf isn't installed —
+    same return contract, so callers don't need to know which mode is active.
+    The fallback drops live preview and the y/Y/? bindings (it has its own
+    minimal '?' help); install fzf for the full experience."""
+    if not shutil.which("fzf"):
+        return _run_fallback(lines, header=header, with_nth=with_nth,
+                             prompt=prompt, initial_query=initial_query)
     cmd = [
         "fzf",
         "--ansi",
@@ -955,6 +963,108 @@ def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
     if result.returncode != 0:
         raise SystemExit(result.returncode)
     return result.stdout.strip()
+
+
+def _slice_visible(line: str, with_nth: str, delimiter: str = "\t") -> str:
+    """Apply fzf's --with-nth slice to a delimited line for display in the
+    fallback picker. Only supports the 'N..' form, which is what this
+    codebase uses ('4..' for sessions, '2..' for messages)."""
+    if with_nth and with_nth.endswith(".."):
+        try:
+            start = max(0, int(with_nth[:-2]) - 1)
+            return delimiter.join(line.split(delimiter)[start:])
+        except ValueError:
+            pass
+    return line
+
+
+def _run_fallback(
+    lines: list[str],
+    *,
+    header: str,
+    with_nth: str = "1..",
+    prompt: str = "> ",
+    initial_query: str | None = None,
+    page_size: int = 30,
+) -> str:
+    """Stdlib-only picker — used when fzf is missing.
+
+    Reads from stdin / writes to stderr so stdout stays clean for redirection.
+    Supported input:
+      NUMBER  → return that row's line
+      /text   → substring filter (case-insensitive)
+      /       → clear filter
+      ?       → on-screen key reference
+      q | EOF → return '' (quit / back, mirrors fzf ESC contract)
+
+    No fuzzy match, no live preview, no key bindings (y/Y from fzf mode).
+    Trade-off documented inline so users know to install fzf for richer UX.
+    """
+    filter_text = initial_query or ""
+    while True:
+        rows = list(enumerate(lines))
+        if filter_text:
+            needle = filter_text.lower()
+            rows = [(i, l) for i, l in rows if needle in l.lower()]
+
+        sys.stderr.write("\n")
+        for h_line in header.split("\n"):
+            sys.stderr.write(f"  {h_line}\n")
+        if filter_text:
+            sys.stderr.write(f"  filter: /{filter_text}  ({len(rows)} match)\n")
+        sys.stderr.write("\n")
+
+        if not rows:
+            sys.stderr.write("  (no matches)\n")
+        else:
+            for idx, line in rows[:page_size]:
+                sys.stderr.write(
+                    f"  {idx + 1:>4}  {_slice_visible(line, with_nth)}\n"
+                )
+            if len(rows) > page_size:
+                sys.stderr.write(
+                    f"  … ({len(rows) - page_size} more — narrow with /text)\n"
+                )
+        sys.stderr.flush()
+
+        try:
+            response = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\n")
+            return ""
+
+        if not response or response.lower() == "q":
+            return ""
+        if response == "?":
+            sys.stderr.write(
+                "\n  Fallback-mode keys:\n"
+                "    NUMBER    open that row\n"
+                "    /text     filter (substring, case-insensitive)\n"
+                "    /         clear filter\n"
+                "    q         quit / back\n"
+                "    ?         this help\n"
+                "  Install fzf for fuzzy matching, live preview, and y/Y bindings.\n\n"
+            )
+            continue
+        if response == "/":
+            filter_text = ""
+            continue
+        if response.startswith("/"):
+            filter_text = response[1:]
+            continue
+        try:
+            num = int(response)
+        except ValueError:
+            sys.stderr.write(
+                f"  unrecognized: {response!r}  "
+                f"(expected number, /text, q, or ?)\n"
+            )
+            continue
+        if 1 <= num <= len(lines):
+            return lines[num - 1]
+        sys.stderr.write(
+            f"  out of range: {num}  (valid: 1..{len(lines)})\n"
+        )
 
 
 def _self_invoke(*args: str) -> str:
@@ -1327,8 +1437,22 @@ def main() -> int:
         return show_help_keys(args.help_keys)
 
     if not shutil_which("fzf"):
-        print("ccs requires fzf in PATH.", file=sys.stderr)
-        return 1
+        # Fallback mode is functional but limited (no fuzzy match, no preview,
+        # no y/Y bindings). One-time hint so users know what they're trading
+        # off and where to upgrade.
+        print(
+            "ccs: fzf not found — running in fallback mode "
+            "(numbered picker, /text filter, no live preview).\n"
+            "  Install fzf for fuzzy matching, live preview, and y/Y bindings:\n"
+            "    macOS:         brew install fzf\n"
+            "    Debian/Ubuntu: sudo apt install fzf\n"
+            "    Arch:          sudo pacman -S fzf\n"
+            "    Fedora:        sudo dnf install fzf\n"
+            "    Windows:       scoop install fzf  (or  winget install junegunn.fzf)\n"
+            "    Source:        https://github.com/junegunn/fzf#installation",
+            file=sys.stderr,
+        )
+        # Fall through — _run_fallback inside run_fzf handles missing fzf.
 
     if args.session:
         # Direct mode: detect by locator shape
