@@ -941,6 +941,13 @@ def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
         "fzf",
         "--ansi",
         "--no-mouse",
+        # reverse layout: prompt at top, header (shortcut cheatsheet) sits
+        # right below it, list grows downward. This is the conventional
+        # search-tool layout (rg|fzf, git log fzf, etc) and — crucially —
+        # keeps the shortcut row visually anchored to the prompt instead of
+        # floating between the list and the prompt where it gets squeezed
+        # by the preview pane.
+        "--layout=reverse",
         "--delimiter", "\t",
         "--with-nth", with_nth,
         "--prompt", prompt,
