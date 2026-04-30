@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -884,11 +885,10 @@ def adapter_for_tool(tool: str) -> Adapter:
 
 
 def shutil_which(command: str) -> str | None:
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = Path(directory) / command
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
+    # Delegate to stdlib so PATHEXT (.exe / .bat / .cmd) resolution works on
+    # native Windows. The hand-rolled version that lived here previously only
+    # tried bare `command`, which silently failed for fzf.exe / bat.exe.
+    return shutil.which(command)
 
 
 # Clipboard fallback chain mirrors qs: pbcopy (mac) → wl-copy (Wayland) →
