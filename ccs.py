@@ -891,8 +891,42 @@ def shutil_which(command: str) -> str | None:
     return None
 
 
+# Clipboard fallback chain mirrors qs: pbcopy (mac) → wl-copy (Wayland) →
+# xclip / xsel (X11) → clip.exe (WSL). First one found wins.
+_CLIPBOARD_CMDS: tuple[list[str], ...] = (
+    ["pbcopy"],
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+    ["clip.exe"],
+)
+
+
+def clipboard_copy(text: str) -> bool:
+    for cmd in _CLIPBOARD_CMDS:
+        if shutil_which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text, text=True, check=True)
+                return True
+            except subprocess.CalledProcessError as exc:
+                print(
+                    f"clipboard copy via {cmd[0]} failed: rc={exc.returncode}. "
+                    f"Tried command: {' '.join(cmd)}",
+                    file=sys.stderr,
+                )
+                return False
+    print(
+        "No clipboard tool found. Tried: "
+        + ", ".join(c[0] for c in _CLIPBOARD_CMDS)
+        + ". Install one of these or set up WSL's clip.exe in PATH.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
-            initial_query: str | None = None, prompt: str = "> ") -> str:
+            initial_query: str | None = None, prompt: str = "> ",
+            bindings: list[str] | None = None) -> str:
     """Returns "" on ESC/Ctrl-C/empty selection so callers can implement
     multi-level navigation (ESC = back one level, not exit)."""
     cmd = [
@@ -906,6 +940,8 @@ def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
         "--preview", preview,
         "--preview-window", "right:65%:wrap",
     ]
+    for binding in bindings or []:
+        cmd += ["--bind", binding]
     if initial_query:
         cmd += ["--query", initial_query]
     result = subprocess.run(
@@ -978,13 +1014,15 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
 
     lines = [session_line(s) for s in sessions]
     preview_cmd = _self_invoke("--preview-session", "{1}", "{2}")
+    help_cmd = _self_invoke("--help-keys", "sessions")
     header_bits = [
         f"{len(sessions)} sessions [{', '.join(s for s in sources if s not in skipped)}]",
-        "Enter: open  •  Esc: quit  •  type to filter",
+        "Enter: open  •  ?: help  •  Esc: quit  •  type to filter",
     ]
     if skipped:
         header_bits.append(f"unavailable: {', '.join(skipped)}")
     header = "  |  ".join(header_bits)
+    bindings = [f"?:execute({help_cmd})"]
 
     while True:
         selected = run_fzf(
@@ -994,6 +1032,7 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
             with_nth="4..",
             initial_query=query,
             prompt="ccs> ",
+            bindings=bindings,
         )
         if not selected:
             return 0
@@ -1026,7 +1065,22 @@ def browse_messages(tool: str, locator: str) -> int:
             summary,
         ]))
     preview_cmd = _self_invoke("--preview-message", tool, locator, "{1}")
-    header = f"{tool} • {len(records)} messages  |  Enter: open in pager  •  Esc: back"
+    copy_session_cmd = _self_invoke("--copy-session", tool, locator)
+    # {1} = message index (visible in row column 1, hidden via --with-nth=2..)
+    copy_message_cmd = _self_invoke("--copy-message", tool, locator, "{1}")
+    help_cmd = _self_invoke("--help-keys", "messages")
+    header = (
+        f"{tool} • {len(records)} messages  |  "
+        f"Enter: open  •  y: copy all  •  Y: copy one  •  ?: help  •  Esc: back"
+    )
+    # execute-silent runs the copy without redrawing the screen; change-header
+    # gives non-modal feedback so the user knows it succeeded but stays in the
+    # picker with their selection intact.
+    bindings = [
+        f"y:execute-silent({copy_session_cmd})+change-header(✓ Copied conversation to clipboard)",
+        f"Y:execute-silent({copy_message_cmd})+change-header(✓ Copied message to clipboard)",
+        f"?:execute({help_cmd})",
+    ]
 
     while True:
         selected = run_fzf(
@@ -1035,6 +1089,7 @@ def browse_messages(tool: str, locator: str) -> int:
             preview=preview_cmd,
             with_nth="2..",
             prompt=f"{tool}> ",
+            bindings=bindings,
         )
         if not selected:
             return 0
@@ -1043,6 +1098,121 @@ def browse_messages(tool: str, locator: str) -> int:
         except ValueError:
             continue
         show_message(tool, locator, idx)
+
+
+def copy_session(tool: str, locator: str) -> int:
+    """Render every message in a session and pipe the joined markdown to the
+    system clipboard. Used by the 'y' binding in the message picker."""
+    adapter = adapter_for_tool(tool)
+    records = adapter.messages(locator)
+    if not records:
+        print(f"No messages to copy in {tool}:{locator}", file=sys.stderr)
+        return 1
+    body = "\n\n---\n\n".join(rec.body for rec in records)
+    if clipboard_copy(body):
+        size = len(body)
+        print(
+            f"✓ Copied {len(records)} messages ({size:,} chars) "
+            f"from {tool} session to clipboard",
+            file=sys.stderr,
+        )
+        return 0
+    return 1
+
+
+_HELP_TEXT = {
+    "sessions": """\
+ccs — session picker
+====================
+
+Navigation
+----------
+  Enter      Open the selected session (drill into messages)
+  Esc        Quit
+  Ctrl-C     Quit
+
+Other
+-----
+  ?          Show this help
+  Type       Substring filter across tool, time, msgs, size, cwd, title
+
+Standard fzf shortcuts
+----------------------
+  Ctrl-N / Ctrl-J / Down     Next item
+  Ctrl-P / Ctrl-K / Up       Previous item
+  Ctrl-D / Ctrl-U            Page down / up
+  Ctrl-A / Ctrl-E            Start / end of query
+  Ctrl-W                     Delete word
+""",
+    "messages": """\
+ccs — message picker (inside a session)
+========================================
+
+Navigation
+----------
+  Enter      Open selected message in bat pager
+  Esc        Back to session picker
+  Ctrl-C     Quit
+
+Clipboard
+---------
+  y          Copy the WHOLE conversation (all messages, joined)
+  Y          Copy ONLY the currently highlighted message
+
+Other
+-----
+  ?          Show this help
+  Type       Substring filter across index, timestamp, type, role, summary
+
+Standard fzf shortcuts
+----------------------
+  Ctrl-N / Ctrl-J / Down     Next item
+  Ctrl-P / Ctrl-K / Up       Previous item
+  Ctrl-D / Ctrl-U            Page down / up
+""",
+}
+
+
+def show_help_keys(scope: str) -> int:
+    text = _HELP_TEXT.get(scope)
+    if text is None:
+        print(
+            f"unknown help scope: '{scope}'. Expected one of: {list(_HELP_TEXT)}",
+            file=sys.stderr,
+        )
+        return 1
+    pager = os.environ.get("PAGER") or ("less" if shutil_which("less") else None)
+    if pager:
+        try:
+            subprocess.run([pager, "-R"], input=text, text=True, check=False)
+            return 0
+        except FileNotFoundError:
+            pass
+    sys.stdout.write(text)
+    return 0
+
+
+def copy_message(tool: str, locator: str, index: int) -> int:
+    """Copy a single message's rendered markdown to clipboard. Used by the
+    'Y' binding in the message picker."""
+    adapter = adapter_for_tool(tool)
+    records = adapter.messages(locator)
+    if index < 1 or index > len(records):
+        print(
+            f"index out of range: got {index}, valid 1..{len(records)} "
+            f"for {tool}:{locator}",
+            file=sys.stderr,
+        )
+        return 1
+    rec = records[index - 1]
+    if clipboard_copy(rec.body):
+        print(
+            f"✓ Copied message #{rec.index} ({rec.role}, {len(rec.body):,} chars) "
+            f"to clipboard",
+            file=sys.stderr,
+        )
+        return 0
+    return 1
 
 
 def show_message(tool: str, locator: str, index: int) -> int:
@@ -1117,6 +1287,13 @@ def parse_args() -> argparse.Namespace:
                         help=argparse.SUPPRESS)
     parser.add_argument("--preview-message", nargs=3, metavar=("TOOL", "LOCATOR", "INDEX"),
                         help=argparse.SUPPRESS)
+    parser.add_argument("--copy-session", nargs=2, metavar=("TOOL", "LOCATOR"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--copy-message", nargs=3, metavar=("TOOL", "LOCATOR", "INDEX"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--help-keys", metavar="SCOPE",
+                        choices=["sessions", "messages"],
+                        help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -1133,6 +1310,19 @@ def main() -> int:
         except ValueError:
             return 1
         return preview_message(tool, locator, idx)
+    if args.copy_session:
+        tool, locator = args.copy_session
+        return copy_session(tool, locator)
+    if args.copy_message:
+        tool, locator, index = args.copy_message
+        try:
+            idx = int(index)
+        except ValueError:
+            print(f"--copy-message INDEX must be an int, got '{index}'", file=sys.stderr)
+            return 1
+        return copy_message(tool, locator, idx)
+    if args.help_keys:
+        return show_help_keys(args.help_keys)
 
     if not shutil_which("fzf"):
         print("ccs requires fzf in PATH.", file=sys.stderr)
