@@ -108,6 +108,28 @@ ccs --session ~/.claude/projects/.../foo.jsonl   # open a JSONL file directly
 ccs --session opencode://ses_2786e7db…           # open an Opencode session by id
 ```
 
+### Keybindings (in fzf)
+
+Session picker:
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Open the message picker for the session |
+| `?` | Show the keybinding help screen |
+| `Esc` | Quit |
+
+Message picker (after picking a session):
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Render the message in `bat` |
+| `y` | Copy the **whole conversation** (all messages, joined) to clipboard |
+| `Y` | Copy **only the highlighted message** to clipboard |
+| `?` | Show the keybinding help screen |
+| `Esc` | Back to session picker |
+
+Clipboard fallback chain: `pbcopy` → `wl-copy` → `xclip` → `xsel` → `clip.exe`.
+
 ### How it works
 
 ```
