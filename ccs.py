@@ -924,10 +924,33 @@ def clipboard_copy(text: str) -> bool:
     return False
 
 
+_LAST_BANNER: list[str] | None = None
+
+
+def print_picker_banner(lines: list[str]) -> None:
+    """Print the shortcut cheatsheet above fzf's inline window — but only
+    when it actually changed.
+
+    Idempotent on repeated calls with the same content. Why this matters:
+    every fzf re-launch (browse_messages → bat → return) used to print
+    the banner again, stacking duplicates downward. With caching, calling
+    this from inside the picker's while-loop is safe — the banner only
+    re-renders when the picker context changes (e.g., session ↔ message
+    transition), so the user always sees the right cheatsheet above the
+    current fzf window without duplicates accumulating."""
+    global _LAST_BANNER
+    if _LAST_BANNER == lines:
+        return
+    _LAST_BANNER = list(lines)
+    sys.stderr.write("\n")
+    for line in lines:
+        sys.stderr.write(f"  {line}\n")
+    sys.stderr.flush()
+
+
 def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
             initial_query: str | None = None, prompt: str = "> ",
-            bindings: list[str] | None = None,
-            banner: list[str] | None = None) -> str:
+            bindings: list[str] | None = None) -> str:
     """Returns "" on ESC/Ctrl-C/empty selection so callers can implement
     multi-level navigation (ESC = back one level, not exit).
 
@@ -936,18 +959,12 @@ def run_fzf(lines: list[str], *, header: str, preview: str, with_nth: str,
     The fallback drops live preview and the y/Y/? bindings (it has its own
     minimal '?' help); install fzf for the full experience.
 
-    `banner` is printed to stderr right before fzf launches. Combined with
-    --height=80%, fzf uses inline mode (bottom 80% of terminal) and the
-    banner stays visible above. This is how the shortcut cheatsheet escapes
-    the narrow ~35% left pane that --header is constrained to."""
+    Shortcut cheatsheet is printed via print_picker_banner() at picker
+    entry, NOT inside this function — see that helper's docstring for
+    why."""
     if not shutil.which("fzf"):
         return _run_fallback(lines, header=header, with_nth=with_nth,
                              prompt=prompt, initial_query=initial_query)
-    if banner:
-        sys.stderr.write("\n")
-        for line in banner:
-            sys.stderr.write(f"  {line}\n")
-        sys.stderr.flush()
     cmd = [
         "fzf",
         "--ansi",
@@ -1152,12 +1169,16 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
     if skipped:
         status += f"  (unavailable: {', '.join(skipped)})"
     header = status
-    banner = [
+    bindings = [f"?:execute({help_cmd})"]
+    sessions_banner = [
         "ccs sessions  —  Enter: open  ·  ?: in-app help  ·  Esc: quit  ·  type to filter",
     ]
-    bindings = [f"?:execute({help_cmd})"]
 
     while True:
+        # Inside the loop so the banner refreshes when we return here from
+        # browse_messages (which would have left a stale messages banner
+        # above). Idempotent — see print_picker_banner() docstring.
+        print_picker_banner(sessions_banner)
         selected = run_fzf(
             lines,
             header=header,
@@ -1166,7 +1187,6 @@ def browse_sessions(sources: list[str], *, cwd_filter: str | None,
             initial_query=query,
             prompt="ccs> ",
             bindings=bindings,
-            banner=banner,
         )
         if not selected:
             return 0
@@ -1206,10 +1226,6 @@ def browse_messages(tool: str, locator: str) -> int:
     # Status in --header (narrow pane), shortcut in `banner` (full terminal
     # width, printed above fzf's inline window). See run_fzf docstring.
     header = f"{tool} • {len(records)} messages"
-    banner = [
-        f"ccs · {tool} session  —  Enter: open  ·  y: copy session  ·  "
-        "Y: copy one  ·  ?: help  ·  Esc: back",
-    ]
     # execute-silent runs the copy without redrawing the screen; change-header
     # gives non-modal feedback so the user knows it succeeded but stays in the
     # picker with their selection intact.
@@ -1218,8 +1234,15 @@ def browse_messages(tool: str, locator: str) -> int:
         f"Y:execute-silent({copy_message_cmd})+change-header(✓ Copied message to clipboard)",
         f"?:execute({help_cmd})",
     ]
+    messages_banner = [
+        f"ccs · {tool} session  —  Enter: open  ·  y: copy session  ·  "
+        "Y: copy one  ·  ?: help  ·  Esc: back",
+    ]
 
     while True:
+        # Idempotent: same banner across iterations is a no-op, but a real
+        # picker transition (sessions ↔ messages) flushes and re-renders.
+        print_picker_banner(messages_banner)
         selected = run_fzf(
             lines,
             header=header,
@@ -1227,7 +1250,6 @@ def browse_messages(tool: str, locator: str) -> int:
             with_nth="2..",
             prompt=f"{tool}> ",
             bindings=bindings,
-            banner=banner,
         )
         if not selected:
             return 0
